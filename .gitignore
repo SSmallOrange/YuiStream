@@ -1,0 +1,18 @@
+# Build output
+bin/
+bin-int/
+
+# Visual Studio
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
+# Precompiled dependencies (manually downloaded, too large for git)
+vendor/ffmpeg/
+vendor/SDL2/
+
+# OS
+Thumbs.db
+.DS_Store
