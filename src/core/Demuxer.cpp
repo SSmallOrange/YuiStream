@@ -41,6 +41,11 @@ bool Demuxer::open(const std::string& url)
         av_dict_set(&opts, "rtsp_transport", "tcp", 0);  // TCP 更稳定
         av_dict_set(&opts, "stimeout", "3000000", 0);    // 超时 3 秒 (微秒)
     }
+    else if (url.find("rtmp://") != std::string::npos)
+    {
+        av_dict_set(&opts, "live", "1", 0);              // 标记为直播流
+        av_dict_set(&opts, "timeout", "3000000", 0);     // 超时 3 秒 (微秒)
+    }
     // 通用低延迟参数
     av_dict_set(&opts, "fflags", "nobuffer", 0);           // 不缓冲
     av_dict_set(&opts, "analyzeduration", "500000", 0);    // 缩短分析时间

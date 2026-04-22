@@ -13,6 +13,9 @@ bin-int/
 vendor/ffmpeg/
 vendor/SDL2/
 
+# Tools
+tools/mediamtx/*.db
+
 # OS
 Thumbs.db
 .DS_Store

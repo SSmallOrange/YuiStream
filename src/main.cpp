@@ -20,7 +20,7 @@ extern "C" {
 
 int main(int argc, char* argv[])
 {
-    printf("=== YuiStream — Day 6: Multi-threaded Pipeline ===\n\n");
+    printf("=== YuiStream — Week 2 Day 1: RTSP/RTMP Streaming ===\n\n");
 
     printf("[FFmpeg] avcodec  : %d.%d.%d\n",
         LIBAVCODEC_VERSION_MAJOR, LIBAVCODEC_VERSION_MINOR, LIBAVCODEC_VERSION_MICRO);
@@ -99,7 +99,7 @@ int main(int argc, char* argv[])
     int winH = static_cast<int>(winW * (static_cast<double>(videoH) / videoW));
 
     SDLVideoSurface surface;
-    if (!surface.create(winW, winH, "YuiStream — Day 6 Pipeline"))
+    if (!surface.create(winW, winH, "YuiStream — Week 2 Day 1"))
     {
         printf("[Error] Failed to create SDLVideoSurface\n");
         SDL_Quit();

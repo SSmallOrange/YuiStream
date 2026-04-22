@@ -1,0 +1,32 @@
+###############################################
+# MediaMTX — YuiStream 开发用精简配置
+# 完整配置参考: https://github.com/bluenviron/mediamtx
+###############################################
+
+# 日志级别: debug, info, warn, error
+logLevel: info
+logDestinations: [stdout]
+
+# RTSP 服务
+rtsp: yes
+rtspAddress: :8554
+protocols: [tcp, udp]
+
+# RTMP 服务
+rtmp: yes
+rtmpAddress: :1935
+
+# HLS (浏览器预览, 可选)
+hls: yes
+hlsAddress: :8888
+
+# WebRTC (不需要, 关闭)
+webrtc: no
+
+# API (按需开启, 可查看活跃流)
+api: yes
+apiAddress: :9997
+
+# 路径配置
+paths:
+  all_others:
