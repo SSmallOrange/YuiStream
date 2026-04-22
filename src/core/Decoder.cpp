@@ -1,5 +1,7 @@
 // Decoder.cpp — 解码器基类实现
 #include "Decoder.h"
+#include "PacketQueue.h"
+#include "FrameQueue.h"
 #include <cstdio>
 
 extern "C" {
@@ -104,20 +106,76 @@ void Decoder::stop()
 
 void Decoder::decodeLoop()
 {
-    // TODO: Day 6 — 多线程串联时实现
-    // AVPacket* pkt = av_packet_alloc();
-    // AVFrame* frame = av_frame_alloc();
-    // while (m_running) {
-    //     AVPacket* pkt = m_input->pop();
-    //     if (!pkt) break;
-    //     avcodec_send_packet(m_codecCtx, pkt);
-    //     av_packet_unref(pkt);
-    //     while (avcodec_receive_frame(m_codecCtx, frame) == 0) {
-    //         onFrameDecoded(frame);
-    //         m_output->push(frame);  // 需要 clone
-    //         av_frame_unref(frame);
-    //     }
-    // }
-    // av_packet_free(&pkt);
-    // av_frame_free(&frame);
+    printf("[Decoder] Decode thread started (stream #%d)\n", m_streamIndex);
+
+    AVFrame* frame = av_frame_alloc();
+    if (!frame)
+    {
+        printf("[Decoder] Failed to allocate AVFrame\n");
+        return;
+    }
+
+    while (m_running.load())
+    {
+        // 从输入队列取 packet
+        AVPacket* pkt = m_input->pop(100);  // 100ms 超时，定期检查 m_running
+        if (!pkt)
+        {
+            // 超时或队列已关闭
+            if (m_input->isClosed())
+            {
+                // 刷新解码器中缓存的帧 (B 帧重排序)
+                avcodec_send_packet(m_codecCtx, nullptr);
+                while (avcodec_receive_frame(m_codecCtx, frame) == 0)
+                {
+                    onFrameDecoded(frame);
+                    if (!m_output->push(frame))
+                    {
+                        break;
+                    }
+                    av_frame_unref(frame);
+                }
+                break;
+            }
+            continue;  // 超时，继续等待
+        }
+
+        // 送入解码器
+        int ret = avcodec_send_packet(m_codecCtx, pkt);
+        av_packet_free(&pkt);  // pop 返回的 packet 由调用者释放
+
+        if (ret < 0)
+        {
+            if (ret != AVERROR(EAGAIN))
+            {
+                char errBuf[256];
+                av_strerror(ret, errBuf, sizeof(errBuf));
+                printf("[Decoder] avcodec_send_packet error: %s\n", errBuf);
+            }
+            continue;
+        }
+
+        // 接收解码后的帧 (一个 packet 可能产生多个 frame)
+        while (avcodec_receive_frame(m_codecCtx, frame) == 0)
+        {
+            onFrameDecoded(frame);
+
+            if (!m_output->push(frame))
+            {
+                av_frame_unref(frame);
+                break;  // 输出队列已关闭
+            }
+            av_frame_unref(frame);
+        }
+    }
+
+    av_frame_free(&frame);
+
+    // 通知下游: 没有更多帧了
+    if (m_output)
+    {
+        m_output->close();
+    }
+
+    printf("[Decoder] Decode thread stopped (stream #%d)\n", m_streamIndex);
 }

@@ -1,8 +1,10 @@
 // VideoRenderer.cpp — OpenGL YUV 渲染器实现
 #include "VideoRenderer.h"
 #include "VideoSurface.h"
+#include "../core/FrameQueue.h"
 #include <glad/glad.h>
 #include <cstdio>
+#include <chrono>
 
 extern "C" {
     #include <libavutil/frame.h>
@@ -173,8 +175,6 @@ void VideoRenderer::resetStats()
 
 void VideoRenderer::start(FrameQueue* frameQueue, Clock* clock, int timeBaseNum, int timeBaseDen)
 {
-    // TODO: Day 6 — 启动独立渲染线程，从 FrameQueue 消费帧
-    // 配合 Clock 实现音视频同步 (Week 2)
     if (m_running.load())
     {
         return;
@@ -185,6 +185,10 @@ void VideoRenderer::start(FrameQueue* frameQueue, Clock* clock, int timeBaseNum,
     m_timeBaseNum = timeBaseNum;
     m_timeBaseDen = timeBaseDen;
     m_running.store(true);
+
+    // 重要: 主线程释放 GL 上下文，渲染线程会在 renderLoop 中 makeCurrent
+    m_surface->releaseCurrent();
+
     m_thread = std::thread(&VideoRenderer::renderLoop, this);
 }
 
@@ -201,16 +205,82 @@ void VideoRenderer::stop()
 
 void VideoRenderer::renderLoop()
 {
-    // TODO: Day 6 — 渲染线程主循环
-    // m_surface->makeCurrent();  // GL 上下文绑定到渲染线程
-    // while (m_running) {
-    //     AVFrame* frame = m_frameQueue->peek();
-    //     if (!frame) continue;
-    //     // 音视频同步逻辑...
-    //     uploadAndRender(frame);
-    //     m_surface->swapBuffers();
-    // }
-    // m_surface->releaseCurrent();
+    printf("[VideoRenderer] Render thread started\n");
+
+    // GL 上下文绑定到渲染线程 (OpenGL 规定一个上下文只能在一个线程上活动)
+    m_surface->makeCurrent();
+
+    // PTS 帧节奏控制
+    // 原理：以第一帧为基准，根据后续帧的 PTS 差值计算应该展示的时刻
+    // Week 2 会用音频 Clock 替代，当前先用 PTS 自身做简易同步
+    bool firstFrame = true;
+    int64_t basePTS = 0;
+    auto baseTime = std::chrono::steady_clock::now();
+    double timeBaseDouble = (m_timeBaseDen > 0)
+        ? static_cast<double>(m_timeBaseNum) / m_timeBaseDen
+        : 0.0;
+
+    // FPS 统计
+    auto lastStatsTime = std::chrono::steady_clock::now();
+    int framesInSecond = 0;
+
+    while (m_running.load())
+    {
+        // 从 FrameQueue 取帧 (100ms 超时，定期检查 m_running)
+        AVFrame* frame = m_frameQueue->pop(100);
+        if (!frame)
+        {
+            if (m_frameQueue->isClosed())
+            {
+                printf("[VideoRenderer] FrameQueue closed, exiting render loop\n");
+                break;
+            }
+            continue;  // 超时，继续
+        }
+
+        // --- PTS 帧节奏控制 ---
+        if (firstFrame)
+        {
+            basePTS = frame->pts;
+            baseTime = std::chrono::steady_clock::now();
+            firstFrame = false;
+        }
+        else if (frame->pts != AV_NOPTS_VALUE && timeBaseDouble > 0.0)
+        {
+            // 计算这一帧相对于第一帧的应该展示时间
+            double ptsDiffSec = (frame->pts - basePTS) * timeBaseDouble;
+            auto targetTime = baseTime + std::chrono::duration<double>(ptsDiffSec);
+            auto now = std::chrono::steady_clock::now();
+
+            if (targetTime > now)
+            {
+                // 帧到达太早 → 等待到正确时刻
+                std::this_thread::sleep_until(targetTime);
+            }
+            // 帧到达太晚 → 不丢帧、直接渲染 (丢帧策略留到 Week 2 配合 Clock)
+        }
+
+        uploadAndRender(frame);
+        m_surface->swapBuffers();
+        m_stats.renderedFrames++;
+        framesInSecond++;
+
+        av_frame_free(&frame);  // pop 返回的帧由调用者释放
+
+        // FPS 统计
+        auto now = std::chrono::steady_clock::now();
+        double elapsed = std::chrono::duration<double>(now - lastStatsTime).count();
+        if (elapsed >= 1.0)
+        {
+            m_stats.currentFPS = framesInSecond / elapsed;
+            framesInSecond = 0;
+            lastStatsTime = now;
+        }
+    }
+
+    m_surface->releaseCurrent();
+    printf("[VideoRenderer] Render thread stopped (rendered=%d, dropped=%d)\n",
+           m_stats.renderedFrames, m_stats.droppedFrames);
 }
 
 bool VideoRenderer::screenshot(const std::string& path)

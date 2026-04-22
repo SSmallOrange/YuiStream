@@ -1,5 +1,6 @@
 // Demuxer.cpp — 解封装器实现
 #include "Demuxer.h"
+#include "PacketQueue.h"
 #include <cstdio>
 
 extern "C" {
@@ -200,18 +201,66 @@ void Demuxer::stop()
 
 void Demuxer::demuxLoop()
 {
-    // TODO: Day 6 — 多线程串联时实现
-    // 基本循环框架：
-    // AVPacket* pkt = av_packet_alloc();
-    // while (m_running) {
-    //     int ret = av_read_frame(m_formatCtx, pkt);
-    //     if (ret < 0) break;
-    //     if (pkt->stream_index == m_streamInfo.videoStreamIndex)
-    //         m_videoQueue->push(pkt);
-    //     else if (pkt->stream_index == m_streamInfo.audioStreamIndex)
-    //         m_audioQueue->push(pkt);
-    //     else
-    //         av_packet_unref(pkt);
-    // }
-    // av_packet_free(&pkt);
+    printf("[Demuxer] Demux thread started\n");
+
+    AVPacket* pkt = av_packet_alloc();
+    if (!pkt)
+    {
+        printf("[Demuxer] Failed to allocate AVPacket\n");
+        return;
+    }
+
+    while (m_running.load())
+    {
+        int ret = av_read_frame(m_formatCtx, pkt);
+        if (ret < 0)
+        {
+            if (ret == AVERROR_EOF)
+            {
+                printf("[Demuxer] EOF reached\n");
+            }
+            else
+            {
+                char errBuf[256];
+                av_strerror(ret, errBuf, sizeof(errBuf));
+                printf("[Demuxer] av_read_frame error: %s\n", errBuf);
+            }
+            break;
+        }
+
+        // 分发到对应的队列
+        if (pkt->stream_index == m_streamInfo.videoStreamIndex && m_videoQueue)
+        {
+            if (!m_videoQueue->push(pkt))
+            {
+                // 队列已关闭
+                av_packet_unref(pkt);
+                break;
+            }
+        }
+        else if (pkt->stream_index == m_streamInfo.audioStreamIndex && m_audioQueue)
+        {
+            if (!m_audioQueue->push(pkt))
+            {
+                av_packet_unref(pkt);
+                break;
+            }
+        }
+
+        av_packet_unref(pkt);
+    }
+
+    av_packet_free(&pkt);
+
+    // 通知下游队列：没有更多数据了
+    if (m_videoQueue)
+    {
+        m_videoQueue->close();
+    }
+    if (m_audioQueue)
+    {
+        m_audioQueue->close();
+    }
+
+    printf("[Demuxer] Demux thread stopped\n");
 }

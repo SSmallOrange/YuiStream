@@ -6,6 +6,8 @@
 
 #include "core/Demuxer.h"
 #include "core/VideoDecoder.h"
+#include "core/PacketQueue.h"
+#include "core/FrameQueue.h"
 #include "render/SDLVideoSurface.h"
 #include "render/VideoRenderer.h"
 
@@ -18,7 +20,7 @@ extern "C" {
 
 int main(int argc, char* argv[])
 {
-    printf("=== YuiStream — Day 5: SDLVideoSurface + VideoRenderer ===\n\n");
+    printf("=== YuiStream — Day 6: Multi-threaded Pipeline ===\n\n");
 
     printf("[FFmpeg] avcodec  : %d.%d.%d\n",
         LIBAVCODEC_VERSION_MAJOR, LIBAVCODEC_VERSION_MINOR, LIBAVCODEC_VERSION_MICRO);
@@ -41,7 +43,7 @@ int main(int argc, char* argv[])
     }
 
     // ========================
-    // 1. 解封装 + 视频解码器
+    // 1. 解封装器
     // ========================
     Demuxer demuxer;
     if (!demuxer.open(url))
@@ -58,6 +60,9 @@ int main(int argc, char* argv[])
         return -1;
     }
 
+    // ========================
+    // 2. 视频解码器
+    // ========================
     VideoDecoder videoDecoder;
     if (!videoDecoder.init(demuxer.getFormatContext(), info.videoStreamIndex))
     {
@@ -72,72 +77,15 @@ int main(int argc, char* argv[])
            codecCtx->width, codecCtx->height);
 
     // ========================
-    // 2. 预解码一批帧
+    // 3. 线程安全队列
     // ========================
-    constexpr int maxBufferedFrames = 300;
-    AVFrame* frameBuffer[maxBufferedFrames];
-    int frameCount = 0;
+    PacketQueue videoPacketQueue(128);   // Demuxer → VideoDecoder
+    FrameQueue videoFrameQueue(8);       // VideoDecoder → VideoRenderer
 
-    AVPacket* pkt = av_packet_alloc();
-    AVFrame* tmpFrame = av_frame_alloc();
-
-    while (frameCount < maxBufferedFrames)
-    {
-        int ret = demuxer.readPacket(pkt);
-        if (ret < 0)
-        {
-            if (ret == AVERROR_EOF)
-            {
-                // 刷新解码器中缓存的帧
-                avcodec_send_packet(codecCtx, nullptr);
-                while (frameCount < maxBufferedFrames &&
-                       avcodec_receive_frame(codecCtx, tmpFrame) == 0)
-                {
-                    frameBuffer[frameCount++] = av_frame_clone(tmpFrame);
-                    av_frame_unref(tmpFrame);
-                }
-            }
-            break;
-        }
-
-        if (pkt->stream_index != info.videoStreamIndex)
-        {
-            av_packet_unref(pkt);
-            continue;
-        }
-
-        ret = avcodec_send_packet(codecCtx, pkt);
-        av_packet_unref(pkt);
-        if (ret < 0)
-        {
-            continue;
-        }
-
-        while (frameCount < maxBufferedFrames &&
-               avcodec_receive_frame(codecCtx, tmpFrame) == 0)
-        {
-            frameBuffer[frameCount++] = av_frame_clone(tmpFrame);
-            av_frame_unref(tmpFrame);
-        }
-    }
-
-    av_frame_free(&tmpFrame);
-    av_packet_free(&pkt);
-
-    if (frameCount == 0)
-    {
-        printf("[Error] Failed to decode any frames\n");
-        videoDecoder.close();
-        demuxer.close();
-        return -1;
-    }
-
-    int videoW = frameBuffer[0]->width;
-    int videoH = frameBuffer[0]->height;
-    printf("[Decode] Buffered %d frames (%dx%d)\n\n", frameCount, videoW, videoH);
+    printf("[Pipeline] PacketQueue capacity: 128, FrameQueue capacity: 8\n\n");
 
     // ========================
-    // 3. 创建 SDLVideoSurface
+    // 4. SDL2 窗口 + VideoRenderer
     // ========================
     if (SDL_Init(SDL_INIT_VIDEO) < 0)
     {
@@ -145,20 +93,19 @@ int main(int argc, char* argv[])
         return -1;
     }
 
+    int videoW = codecCtx->width;
+    int videoH = codecCtx->height;
     int winW = videoW > 1280 ? 1280 : videoW;
     int winH = static_cast<int>(winW * (static_cast<double>(videoH) / videoW));
 
     SDLVideoSurface surface;
-    if (!surface.create(winW, winH, "YuiStream — Day 5"))
+    if (!surface.create(winW, winH, "YuiStream — Day 6 Pipeline"))
     {
         printf("[Error] Failed to create SDLVideoSurface\n");
         SDL_Quit();
         return -1;
     }
 
-    // ========================
-    // 4. 初始化 VideoRenderer
-    // ========================
     VideoRenderer renderer;
     if (!renderer.init(&surface))
     {
@@ -169,25 +116,40 @@ int main(int argc, char* argv[])
     }
 
     // ========================
-    // 5. 渲染循环
+    // 5. 启动多线程管线
     // ========================
-    printf("[Render] Entering render loop (ESC or close window to exit)...\n\n");
+    // 线程启动顺序：渲染器 → 解码器 → 解封装器 (下游先启动，避免队列堆积)
 
+    // 获取视频流 time_base (渲染线程将来做同步用)
+    AVStream* videoStream = demuxer.getFormatContext()->streams[info.videoStreamIndex];
+    int tbNum = videoStream->time_base.num;
+    int tbDen = videoStream->time_base.den;
+
+    // 5a. 启动渲染线程 (GL 上下文从主线程转移到渲染线程)
+    renderer.start(&videoFrameQueue, nullptr, tbNum, tbDen);
+    printf("[Pipeline] Render thread started\n");
+
+    // 5b. 启动解码线程
+    videoDecoder.start(&videoPacketQueue, &videoFrameQueue);
+    printf("[Pipeline] Decode thread started\n");
+
+    // 5c. 启动解封装线程
+    demuxer.start(&videoPacketQueue, nullptr);
+    printf("[Pipeline] Demux thread started\n");
+
+    printf("\n[Pipeline] === All threads running ===\n");
+    printf("[Pipeline] Demuxer → PacketQueue → VideoDecoder → FrameQueue → VideoRenderer\n");
+    printf("[Pipeline] Press ESC or close window to stop.\n\n");
+
+    // ========================
+    // 6. 主线程：事件循环 + 状态监控
+    // ========================
     bool running = true;
-    int currentFrame = 0;
-
-    // 帧率控制
-    double fps = info.fps > 0 ? info.fps : 30.0;
-    double frameIntervalMs = 1000.0 / fps;
-    uint32_t lastFrameTick = SDL_GetTicks();
-
-    // FPS 统计
     uint32_t lastStatsTick = SDL_GetTicks();
-    int framesThisSecond = 0;
 
     while (running)
     {
-        // --- 事件处理 ---
+        // 事件处理
         SDL_Event event;
         while (SDL_PollEvent(&event))
         {
@@ -207,65 +169,88 @@ int main(int argc, char* argv[])
             case SDL_WINDOWEVENT:
                 if (event.window.event == SDL_WINDOWEVENT_RESIZED)
                 {
-                    int w = event.window.data1;
-                    int h = event.window.data2;
-                    surface.resize(w, h);
-                    renderer.setViewport(w, h);
+                    // 窗口 resize 事件 — renderer 在自己的线程中处理
+                    // 这里只更新 surface 记录的尺寸
+                    surface.resize(event.window.data1, event.window.data2);
                 }
                 break;
             }
         }
 
-        // --- 帧率控制 ---
-        uint32_t now = SDL_GetTicks();
-        double elapsed = static_cast<double>(now - lastFrameTick);
-        if (elapsed < frameIntervalMs)
+        // 检测管线是否自然结束 (EOF)
+        if (!renderer.isRunning() && videoFrameQueue.isClosed())
         {
-            SDL_Delay(1);
-            continue;
+            printf("[Pipeline] Playback finished (EOF)\n");
+            running = false;
         }
-        lastFrameTick = now;
 
-        // --- 渲染当前帧 ---
-        AVFrame* frame = frameBuffer[currentFrame];
-        currentFrame = (currentFrame + 1) % frameCount;
-
-        renderer.renderFrame(frame);
-        framesThisSecond++;
-
-        // --- FPS 统计 + 窗口标题 ---
+        // 状态监控 (每秒更新窗口标题)
+        uint32_t now = SDL_GetTicks();
         if (now - lastStatsTick >= 1000)
         {
-            double displayFPS = framesThisSecond * 1000.0 / (now - lastStatsTick);
             const auto& stats = renderer.getStats();
+            size_t pktQueueSize = videoPacketQueue.size();
+            size_t frameQueueSize = videoFrameQueue.size();
 
-            char title[128];
+            char title[256];
             snprintf(title, sizeof(title),
-                     "YuiStream — %dx%d | Frame %d/%d | %.1f FPS | Total: %d",
-                     videoW, videoH, currentFrame, frameCount,
-                     displayFPS, stats.renderedFrames);
+                     "YuiStream — %dx%d | %.1f FPS | Rendered: %d | PktQ: %zu | FrmQ: %zu",
+                     videoW, videoH,
+                     stats.currentFPS,
+                     stats.renderedFrames,
+                     pktQueueSize,
+                     frameQueueSize);
             surface.setTitle(title);
 
-            framesThisSecond = 0;
             lastStatsTick = now;
         }
+
+        SDL_Delay(16);  // 主线程 ~60Hz 轮询即可
     }
 
     // ========================
-    // 6. 清理
+    // 7. 优雅停止管线
     // ========================
-    printf("\n[Cleanup] Releasing resources...\n");
+    // 停止顺序：上游先停，通过 close 队列传递停止信号到下游
+    printf("\n[Pipeline] Stopping...\n");
 
-    for (int i = 0; i < frameCount; i++)
-    {
-        av_frame_free(&frameBuffer[i]);
-    }
+    // 停止解封装 (会关闭 videoPacketQueue)
+    demuxer.stop();
+    printf("[Pipeline] Demuxer stopped\n");
+
+    // 关闭 packet 队列 (唤醒阻塞的解码线程)
+    videoPacketQueue.close();
+
+    // 停止解码 (会关闭 videoFrameQueue)
+    videoDecoder.stop();
+    printf("[Pipeline] VideoDecoder stopped\n");
+
+    // 关闭 frame 队列 (唤醒阻塞的渲染线程)
+    videoFrameQueue.close();
+
+    // 停止渲染
+    renderer.stop();
+    printf("[Pipeline] VideoRenderer stopped\n");
+
+    // 清理队列残余
+    videoPacketQueue.flush();
+    videoFrameQueue.flush();
+
+    // ========================
+    // 8. 清理资源
+    // ========================
+    const auto& finalStats = renderer.getStats();
+    printf("\n=== Pipeline Summary ===\n");
+    printf("  Rendered frames: %d\n", finalStats.renderedFrames);
+    printf("  Dropped frames : %d\n", finalStats.droppedFrames);
+    printf("  Final FPS      : %.1f\n", finalStats.currentFPS);
+    printf("========================\n\n");
 
     videoDecoder.close();
     demuxer.close();
     surface.destroy();
     SDL_Quit();
 
-    printf("Day 5 test complete.\n");
+    printf("Day 6 test complete.\n");
     return 0;
 }
