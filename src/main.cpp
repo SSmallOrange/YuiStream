@@ -20,7 +20,7 @@ extern "C" {
 
 int main(int argc, char* argv[])
 {
-    printf("=== YuiStream — Week 2 Day 1: RTSP/RTMP Streaming ===\n\n");
+    printf("=== YuiStream — Week 2 Day 2: Network Stream Hardening ===\n\n");
 
     printf("[FFmpeg] avcodec  : %d.%d.%d\n",
         LIBAVCODEC_VERSION_MAJOR, LIBAVCODEC_VERSION_MINOR, LIBAVCODEC_VERSION_MICRO);
@@ -99,7 +99,7 @@ int main(int argc, char* argv[])
     int winH = static_cast<int>(winW * (static_cast<double>(videoH) / videoW));
 
     SDLVideoSurface surface;
-    if (!surface.create(winW, winH, "YuiStream — Week 2 Day 1"))
+    if (!surface.create(winW, winH, "YuiStream — Week 2 Day 2"))
     {
         printf("[Error] Failed to create SDLVideoSurface\n");
         SDL_Quit();
@@ -244,6 +244,17 @@ int main(int argc, char* argv[])
     printf("  Rendered frames: %d\n", finalStats.renderedFrames);
     printf("  Dropped frames : %d\n", finalStats.droppedFrames);
     printf("  Final FPS      : %.1f\n", finalStats.currentFPS);
+
+    // 打印 Demuxer 退出原因
+    const char* exitReasonStr = "Unknown";
+    switch (demuxer.getExitReason())
+    {
+    case Demuxer::ExitReason::None:         exitReasonStr = "None"; break;
+    case Demuxer::ExitReason::EndOfFile:    exitReasonStr = "EOF"; break;
+    case Demuxer::ExitReason::NetworkError: exitReasonStr = "NetworkError"; break;
+    case Demuxer::ExitReason::Stopped:      exitReasonStr = "UserStopped"; break;
+    }
+    printf("  Demuxer exit   : %s\n", exitReasonStr);
     printf("========================\n\n");
 
     videoDecoder.close();
@@ -251,6 +262,6 @@ int main(int argc, char* argv[])
     surface.destroy();
     SDL_Quit();
 
-    printf("Day 6 test complete.\n");
+    printf("Week 2 Day 2 test complete.\n");
     return 0;
 }
