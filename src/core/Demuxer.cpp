@@ -71,7 +71,7 @@ bool Demuxer::open(const std::string& url)
     }
 
     // 填充 StreamInfo
-    m_streamInfo = {};  // 复位
+    m_streamInfo = {};
 
     for (unsigned int i = 0; i < m_formatCtx->nb_streams; ++i)
     {
