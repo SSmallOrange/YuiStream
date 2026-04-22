@@ -1,6 +1,8 @@
 #include <cstdio>
+#include <string>
 #include <SDL.h>
 #include <glad/glad.h>
+#include "core/Demuxer.h"
 
 // FFmpeg headers
 extern "C" {
@@ -9,111 +11,145 @@ extern "C" {
     #include <libavformat/avformat.h>
 }
 
+// 打印 AVPacket 的简要信息
+static void printPacketInfo(const AVPacket* pkt, const Demuxer::StreamInfo& info)
+{
+    const char* type = "???";
+    if (pkt->stream_index == info.videoStreamIndex)
+    {
+        type = "VIDEO";
+    }
+    else if (pkt->stream_index == info.audioStreamIndex)
+    {
+        type = "AUDIO";
+    }
+    else
+    {
+        type = "OTHER";
+    }
+
+    bool isKeyFrame = (pkt->flags & AV_PKT_FLAG_KEY) != 0;
+
+    printf("[Packet] stream #%d %-5s | size: %6d bytes | pts: %8lld | dts: %8lld | duration: %5lld%s\n",
+        pkt->stream_index,
+        type,
+        pkt->size,
+        pkt->pts,
+        pkt->dts,
+        pkt->duration,
+        isKeyFrame ? " [KEY]" : "");
+}
+
 int main(int argc, char* argv[])
 {
-    printf("=== YuiStream Test ===\n\n");
-    printf("[FFmpeg] libavcodec   : %s\n", avcodec_configuration());
-    printf("[FFmpeg] avcodec      : %d.%d.%d\n",
+    printf("=== YuiStream — Day 2: Demuxer Test ===\n\n");
+
+    // --- 环境信息 ---
+    printf("[FFmpeg] avcodec  : %d.%d.%d\n",
         LIBAVCODEC_VERSION_MAJOR, LIBAVCODEC_VERSION_MINOR, LIBAVCODEC_VERSION_MICRO);
-    printf("[FFmpeg] avformat     : %d.%d.%d\n",
+    printf("[FFmpeg] avformat : %d.%d.%d\n",
         LIBAVFORMAT_VERSION_MAJOR, LIBAVFORMAT_VERSION_MINOR, LIBAVFORMAT_VERSION_MICRO);
-    printf("[FFmpeg] avutil       : %d.%d.%d\n\n",
+    printf("[FFmpeg] avutil   : %d.%d.%d\n\n",
         LIBAVUTIL_VERSION_MAJOR, LIBAVUTIL_VERSION_MINOR, LIBAVUTIL_VERSION_MICRO);
 
-    // SDL2 初始化
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) 
+    // --- 确定媒体源 ---
+    // 优先使用命令行参数，否则使用默认测试文件
+    std::string url;
+    if (argc > 1)
     {
-        printf("[SDL2] Init failed: %s\n", SDL_GetError());
+        url = argv[1];
+    }
+    else
+    {
+        // 默认测试文件
+        url = "http://vjs.zencdn.net/v/oceans.mp4";
+        printf("[Info] No input specified, using default: %s\n", url.c_str());
+        printf("[Info] Usage: YuiStream.exe <file_or_url>\n\n");
+    }
+
+    // --- Demuxer 测试 ---
+    Demuxer demuxer;
+
+    if (!demuxer.open(url))
+    {
+        printf("[Error] Failed to open: %s\n", url.c_str());
         return -1;
     }
-    printf("[SDL2] Initialized successfully\n");
 
-    // 设置 OpenGL 属性
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 5);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    const auto& info = demuxer.getStreamInfo();
 
-    // 创建窗口
-    SDL_Window* window = SDL_CreateWindow(
-        "YuiStream - Day 0 Smoke Test",
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        1280, 720,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE
-    );
+    // --- 读取并打印前 N 个 packet ---
+    constexpr int maxPackets = 50;
+    int videoPackets = 0;
+    int audioPackets = 0;
+    int otherPackets = 0;
+    int totalPackets = 0;
+    int64_t totalBytes = 0;
 
-    if (!window) 
+    printf("\n[Demuxer] Reading first %d packets...\n\n", maxPackets);
+
+    AVPacket* pkt = av_packet_alloc();
+    if (!pkt)
     {
-        printf("[SDL2] Window creation failed: %s\n", SDL_GetError());
-        SDL_Quit();
+        printf("[Error] Failed to allocate AVPacket\n");
         return -1;
     }
-    printf("[SDL2] Window created: 1280x720\n");
 
-    // 创建 OpenGL 上下文
-    SDL_GLContext glContext = SDL_GL_CreateContext(window);
-    if (!glContext) 
+    while (totalPackets < maxPackets)
     {
-        printf("[SDL2] OpenGL context creation failed: %s\n", SDL_GetError());
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        return -1;
-    }
-    printf("[SDL2] OpenGL context created\n");
-
-    // GLAD 加载 OpenGL 函数
-    if (!gladLoadGLLoader((GLADloadproc)SDL_GL_GetProcAddress)) 
-    {
-        printf("[GLAD] Failed to load OpenGL functions\n");
-        SDL_GL_DeleteContext(glContext);
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        return -1;
-    }
-    printf("[OpenGL] Version  : %s\n", glGetString(GL_VERSION));
-    printf("[OpenGL] Renderer : %s\n", glGetString(GL_RENDERER));
-    printf("[OpenGL] Vendor   : %s\n\n", glGetString(GL_VENDOR));
-
-    // 关闭 VSync
-    SDL_GL_SetSwapInterval(0);
-
-    printf("Smoke Test Passed! Press ESC or close window to exit\n");
-
-    bool running = true;
-    SDL_Event event;
-
-    while (running) 
-    {
-        while (SDL_PollEvent(&event)) 
+        int ret = demuxer.readPacket(pkt);
+        if (ret < 0)
         {
-            switch (event.type) {
-                case SDL_QUIT:
-                    running = false;
-                    break;
-                case SDL_KEYDOWN:
-                    if (event.key.keysym.sym == SDLK_ESCAPE)
-                        running = false;
-                    break;
-                case SDL_WINDOWEVENT:
-                    if (event.window.event == SDL_WINDOWEVENT_RESIZED) 
-                    {
-                        int w = event.window.data1;
-                        int h = event.window.data2;
-                        glViewport(0, 0, w, h);
-                    }
-                    break;
+            if (ret == AVERROR_EOF)
+            {
+                printf("\n[Demuxer] End of file reached\n");
             }
+            else
+            {
+                char errBuf[256];
+                av_strerror(ret, errBuf, sizeof(errBuf));
+                printf("\n[Demuxer] Read error: %s\n", errBuf);
+            }
+            break;
         }
 
-        glClearColor(0.1f, 0.1f, 0.2f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
+        printPacketInfo(pkt, info);
 
-        SDL_GL_SwapWindow(window);
+        // 统计
+        totalBytes += pkt->size;
+        if (pkt->stream_index == info.videoStreamIndex)
+        {
+            videoPackets++;
+        }
+        else if (pkt->stream_index == info.audioStreamIndex)
+        {
+            audioPackets++;
+        }
+        else
+        {
+            otherPackets++;
+        }
+        totalPackets++;
+
+        av_packet_unref(pkt);
     }
 
-    SDL_GL_DeleteContext(glContext);
-    SDL_DestroyWindow(window);
-    SDL_Quit();
+    av_packet_free(&pkt);
 
-    printf("YuiStream exited cleanly.\n");
+    // --- 统计摘要 ---
+    printf("\n=== Packet Summary ===\n");
+    printf("  Total  : %d packets, %lld bytes (%.2f KB)\n", totalPackets, totalBytes, (double)totalBytes / 1024.0);
+    printf("  Video  : %d packets\n", videoPackets);
+    printf("  Audio  : %d packets\n", audioPackets);
+    if (otherPackets > 0)
+    {
+        printf("  Other  : %d packets\n", otherPackets);
+    }
+    printf("======================\n\n");
+
+    // --- 清理 ---
+    demuxer.close();
+    printf("[Demuxer] Closed. Day 2 test complete.\n");
+
     return 0;
 }
